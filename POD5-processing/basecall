@@ -1,0 +1,515 @@
+#!/bin/bash
+# ============================================================================
+# Basecalling Function
+# ============================================================================
+#
+# This script automates SUP basecalling of long-reads using either Dorado or Guppy.
+# It supports demultiplexing adn quality control.
+#
+# Usage:
+#   basecall [-h] [OPTIONS] <basecaller>
+#
+# Requirements:
+#   - Conda environment with all necessary tools installed
+#   - Input data in the specified directories
+#   - Sufficient computational resources (CPU, RAM, GPU for basecalling)
+#
+# Arguments:
+#   -h, --help      Display this help message and exit.
+#   basecaller      Basecaller to use. Must be either 'dorado' or 'guppy'
+#   -t, --threads   Number of threads to use (default: 16).
+#   -q, --qscore    Minimum quality score for reads (default: 7).
+#   -m, --model     Model for basecalling. Must be either 'default' or 'latest'
+#
+# Author: Cristina S. Mesquita
+# Date: June 2024
+# Version: 1.0
+#
+# ============================================================================
+
+# Function to display help message
+display_help() {
+  cat << EOF
+============================================================================
+Basecalling Function
+============================================================================
+
+Description:
+  This script automates SUP basecalling of long-reads using either Dorado or Guppy.
+  It supports demultiplexing adn quality control.
+  You may abort this script by pressing 'Ctrl+Shift+C'.
+
+Usage:
+  basecall [OPTIONS] <basecaller>
+
+Arguments:
+  basecaller    Basecaller to use. Must be either 'dorado' or 'guppy'
+
+Options:
+  -h, --help       Display this help message and exit
+  -t, --threads    Number of threads to use (default: 16)
+  -q, --qscore     Minimum quality score for reads (default: 7)
+  -m, --model      Model for basecalling. Must be either 'default' or 'latest'
+
+Examples:
+  $0 dorado
+  $0 -t 20 guppy
+  $0 --qscore 10 --model latest dorado
+
+============================================================================
+EOF
+}
+
+# Detect the computer the script is being run to adjust the directories
+current_user=$(whoami)
+machine_name=$(hostname)
+echo "$current_user @$machine_name"
+
+if [[ "$machine_name" == "i3cris" ]]; then
+    specific_user="cris"
+elif [[ "$machine_name" == "i3SDiag-06u" ]]; then
+    specific_user="i3sdiag"
+else
+    specific_user="$current_user"
+fi
+
+
+# Ensuring commands can be run
+dorado="/home/$specific_user/soft/ONT/dorado-0.7.3/bin/dorado"
+guppy_basecaller="/home/$specific_user/soft/ONT/ont-guppy/bin/guppy_basecaller"
+guppy_barcoder="/home/$specific_user/soft/ONT/ont-guppy/bin/guppy_barcoder"
+
+# Verify if executables exist
+if [[ ! -x "$dorado" || ! -x "$guppy_basecaller" || ! -x "$guppy_barcoder" ]]; then
+  echo "Error: One or more executable paths are incorrect or do not have execute permissions."
+  exit 1
+fi
+
+# Function to display colored text
+colored_text() {
+    color=$1
+    text=$2
+    echo -e "\e[${color}m${text}\e[0m"
+}
+
+# Function to display yellow text
+yellow_text() {
+    colored_text 33 "$1"
+}
+
+# Logging setup with dynamic filename
+SCRIPT_NAME=$(basename "$0" .sh)
+TIMESTAMP=$(date +"%y%m%d-%H%M")  # Changed to YYMMDD_HHM format
+LOG_DIR="/media/U/#Bioinformatics/.logfiles"
+LOG_FILE="${LOG_DIR}/${SCRIPT_NAME}-${TIMESTAMP}.log"
+
+# Logging function
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "$timestamp [$level] $message" >> "$LOG_FILE"
+}
+
+# Function to log tool versionS
+log_tool_versions() {
+    log "INFO" "Tool Versions:"
+    log "INFO" "  rsync: $(rsync --version 2>&1 | head -n1)"
+    log "INFO" "  python: $(python3 --version)"
+    log "INFO" "  dorado: $(dorado --version 2>&1 | head -n1 )"
+    log "INFO" "  guppy: $(guppy_basecaller --version 2>&1 | head -n1 )"
+    log "INFO" "  porechop: $(porechop --version)"
+    log "INFO" "  fastp: $(fastp --version)"
+    log "INFO" "  chopper: $(chopper --version)"
+    log "INFO" "  nanostat: $(NanoStat --version)"
+    log "INFO" "  porechop: $(porechop --version)"
+    log ""
+}
+
+# Function to activate conda environment
+activate_conda() {
+  source /home/$specific_user/soft/miniconda3/etc/profile.d/conda.sh
+  CONDA_ENV_NAME="ont-diag"
+  log "DEBUG" "Activating conda environment: $CONDA_ENV_NAME"
+  conda activate "$CONDA_ENV_NAME"
+  if [[ $? -ne 0 ]]; then
+    colored_text 31 "Error: Failed to activate conda environment ${CONDA_ENV_NAME}."
+	log "ERROR" "Failed to activate conda environment ${CONDA_ENV_NAME}."
+    exit 1
+  fi
+  # Ensure correct PATH
+  #CONDA_PATH="/home/$specific_user/soft/miniconda3"
+  #export PATH="${CONDA_PATH}/bin:$PATH"
+}
+
+# Parse command line arguments
+parse_arguments() {
+  THREADS=16
+  QSCORE=7
+  BASECALLER="dorado"
+  MODEL="default"
+
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -h|--help)
+        display_help
+        exit 0
+        ;;
+      -t|--threads)
+        THREADS="$2"
+        log "INFO" "Setting threads to $THREADS"
+        shift 2
+        ;;
+      -q|--qscore)
+        QSCORE="$2"
+        log "INFO" "Setting minimum Q-score to $QSCORE"
+        shift 2
+        ;;
+      dorado|guppy)
+        BASECALLER="$1"
+        log "INFO" "Setting basecaller to $BASECALLER"
+        shift
+        ;;
+      -m|--model default|latest)
+        MODEL="$2"
+        log "INFO" "Setting model to $MODEL"
+        shift 2
+        ;;
+      *)
+        echo "Unknown option: $1"
+        display_help
+        exit 1
+        ;;
+    esac
+  done
+  
+  if [ -z "$BASECALLER" ]; then
+    echo "Error: Basecaller (dorado, guppy or none) must be specified."
+    display_help
+    exit 1
+  fi
+  
+  activate_conda
+  log_tool_versions
+  prompt_user
+}
+
+# Function to prompt the user for additional parameters
+prompt_user() {
+    if [[ -z "$DIRECTORY" ]]; then
+        read -p "$(yellow_text 'Input full path to U: directory containing the settings file previously created: ')" DIRECTORY
+    fi
+	log "INFO" "User input for settings directory: $DIRECTORY"
+	# Read the settings file
+	while IFS= read -r line; do
+		if [[ "$line" == *:* ]]; then # Ignore lines that don't contain ":"
+			# Split the line into key and value using ":" as delimiter
+			key=$(echo "$line" | cut -d ':' -f 1 | tr -d '[:space:]')
+			value=$(echo "$line" | cut -d ':' -f 2- | sed 's/^[[:space:]]*//')
+			declare "$key=$value" # Assign the value to a variable with the key as the variable name
+			log "DEBUG" "Setting $key=$value"
+		fi
+	done < "${DIRECTORY}"/settings
+	log "INFO" "Finished reading settings file"
+
+    read -p "$(yellow_text 'Do you wish to run this locally (1) or remotely (2)? ')" RUNSIDE
+	log "INFO" "User selected to run ${RUNSIDE}"
+		if [[ "$RUNSIDE" = "1" ]]; then
+			BASE_DIR="/home/$current_user/Documents/"${EXPERIMENT}/${SAMPLE}
+			log "INFO" "Running locally. Base directory set to: $BASE_DIR"
+			mkdir -p "${BASE_DIR}"
+			log "DEBUG" "Created directory: $BASE_DIR"
+			log "INFO" "Starting rsync of pod5 files"
+			rsync --progress --update -ha "/media/U/RemoteAnalysis/"${EXPERIMENT}/${SAMPLE}/pod5 "${BASE_DIR}"
+			log "INFO" "Finished rsync of pod5 files"
+		else
+			BASE_DIR="/media/U/RemoteAnalysis/"${EXPERIMENT}/${SAMPLE}
+			log "INFO" "Running remotely. Base directory set to: $BASE_DIR"
+		fi
+	cd "$BASE_DIR" || { log "ERROR" "Failed to change directory to $BASE_DIR"; colored_text 31 "Error: Failed to change directory to $BASE_DIR"; exit 1; }
+	echo "You currently are working in ${PWD}"
+	log "INFO" "Current working directory: ${PWD}"
+
+	POD5="./pod5"
+	echo "Importing previous settings: "
+	echo "   ${EXPERIMENT} as experiment"
+	echo "   ${SAMPLE} as sample"
+	echo "   ${TECHNOLOGY} as technology used"
+	echo -e "   ${KIT} as kit \n"
+	log "INFO" "Importing previous settings"
+	log "INFO" "EXPERIMENT: ${EXPERIMENT}, SAMPLE: ${SAMPLE}, TECHNOLOGY: ${TECHNOLOGY}, KIT: ${KIT}"
+	log "DEBUG" "POD5 directory set to: $POD5"
+}
+
+parse_arguments "$@"
+if [ "$1" != "-h" ] && [ "$1" != "--help" ]; then
+    log "DEBUG" "Script started with arguments: $*"
+fi
+
+########################################	DEFINITION OF BASECALLING-ASSOCIATED FUNCTIONS	########################################
+
+# Function to kill dorado_basecall_server process and dorado/guppy in bg using over 300MiB
+kill_dorado_process() {
+  # Check for dorado_basecall_server
+  if [[ $(pgrep -f "dorado_basecall_server") ]]; then
+    # Get the PID of the running process
+    PID=$(pgrep -f "dorado_basecall_server" | head -1)
+    log "INFO" "Found dorado_basecall_server running with PID: $PID"
+    # Automatically kill the process
+    cat /home/$specific_user/Documents/.sudo | sudo -S kill -9 "$PID"
+    log "INFO" "Successfully killed dorado_basecall_server process"
+  fi
+  # Check for guppy processes
+  other_processes=$(pgrep -f "guppy|dorado")
+  if [[ ! -z "$other_processes" ]]; then
+    for PID in $other_processes; do
+        # Get memory usage
+        MEM=$(ps -p "$PID" -o rss | tail -1)
+        if [[ $(expr $MEM : '\(.*\)') -gt 300 ]]; then
+            log "INFO" "Guppy or dorado process $PID is consuming more than 300MiB: $MEM"
+            # Automatically kill the process
+            cat /home/$specific_user/Documents/.sudo | sudo -S kill -9 "$PID"
+            log "INFO" "Successfully killed process $PID"
+        fi
+    done
+  fi
+}
+
+# Function to process barcodes
+run_porechop() {
+    local input_file=$1
+	local input_dir=$2
+    local barcode=$3
+	log "DEBUG" "Function run_porechop parsing arguments: input_file=$1, input_dir=$2, barcode=$3"
+    porechop -i "$input_file" --threads 8 -b "${input_dir}/porechop/${barcode}" \
+        --end_threshold 93 --middle_threshold 95 --barcode_threshold 93 \
+        --extra_middle_trim_good_side 5 --extra_middle_trim_bad_side 15 --min_split_read_size 150 2>&1 | \
+        sed -r 's/\x1B\[[0-9;]*[mG]//g' > "${input_dir}/porechop/${barcode}.log"
+}
+
+process_barcodes() {
+    local QSCORE=$1
+    local kit=$2
+	log "INFO" "Starting process_barcodes function with QSCORE=$QSCORE and kit=$kit"
+    log "INFO" "Running Porechop demux and concatenating files for each barcode..."
+   	#dorado has KIT_barcode.fastq
+    echo "Running Porechop demux and concatenating files..."
+	if [[ -d "basecall/doradoCall/demux" ]]; then
+		input_dir="basecall/doradoCall"
+	elif [[ -d "basecall/guppyCall/demux" ]]; then
+		input_dir="basecall/guppyCall"
+	else
+		colored_text 31 "Error: Neither doradoCall nor guppyCall demux directories found."
+		log "ERROR" "Neither doradoCall nor guppyCall demux directories found."
+		return 1
+	fi
+	mkdir -p "${input_dir}/porechop"
+    log "INFO" "Created porechop directory: ${input_dir}/porechop"
+
+	# Process files based on input directory
+	if [[ "$input_dir" == "basecall/doradoCall" ]]; then
+        log "INFO" "Processing doradoCall files"
+		for file in "${input_dir}/demux/${kit}_"*.fastq; do
+			# Extract the basename of the file
+			barcode=$(basename "$file" .fastq | cut -d'_' -f2)
+            log "DEBUG" "Processing file: $file, extracted barcode: $barcode"
+			run_porechop "$file" "$input_dir" "$barcode"
+		done
+	else
+		log "INFO" "Processing guppyCall files"
+		for barcode_dir in "${input_dir}/demux/"*; do
+			barcode=$(basename "$barcode_dir")
+            log "DEBUG" "Processing barcode directory: $barcode_dir, extracted barcode: $barcode"
+			for file in "${barcode_dir}"/*.fastq; do
+				run_porechop "$file" "$input_dir" "$barcode"
+			done
+		done
+	fi
+
+    # Ask for the barcodes and their corresponding sample names
+    declare -A barcode_map
+    read -p "$(yellow_text 'Which barcodes did you use (e.g., barcode02 barcode03)? ')" barcodes
+    log "INFO" "User input for used barcodes: $barcodes"
+
+    # Save barcode map to a file
+    barcode_map_file="${LOG_DIR}/${SCRIPT_NAME}-${TIMESTAMP}-barcode_map.txt"
+    > "$barcode_map_file"  # Clear the file if it exists
+
+    for barcode in $barcodes; do
+		read -p "$(yellow_text "${barcode} corresponds to sample: ")" sample
+        barcode_map[$barcode]=$sample
+		echo "${barcode},${sample}" >> "$barcode_map_file"
+        log "INFO" "Mapped $barcode to sample $sample"
+    done
+    log "INFO" "Barcode map saved to $barcode_map_file"
+
+    for barcode in "${!barcode_map[@]}"; do
+        sample=${barcode_map[$barcode]}
+        barcode_num=${barcode//[!0-9]/}  # Extract the numeric part of the barcode
+        log "INFO" "Processing barcode $barcode (number $barcode_num) for sample $sample"
+
+        # Gather all BCxx.fastq files for this barcode and concatenate with the none.fastq file from the specific barcode directory
+        files_to_concat=( $(find "$input_dir/porechop" -type f -name "BC${barcode_num}.fastq") )
+		if [[ ${#files_to_concat[@]} -gt 0 ]]; then
+            log "DEBUG" "Files to concatenate for $barcode: ${files_to_concat[*]}, $input_dir/porechop/$barcode/none.fastq"
+            cat "${files_to_concat[@]}" "$input_dir/porechop/$barcode/none.fastq" > "$input_dir/porechop/${sample}.fastq"
+            log "INFO" "Concatenated files for sample $sample"
+        else
+            log "WARNING" "No files found for barcode $barcode"
+        fi
+        # Perform quality filtering and trimming
+        log "INFO" "Starting quality filtering and trimming for sample $sample"
+        fastp --in1 "$input_dir/porechop/${sample}.fastq" --stdout \
+            --disable_adapter_trimming --dont_eval_duplication --qualified_quality_phred "$QSCORE" \
+            --length_required 150 --html "$input_dir/fastp_${sample}.html" --thread 8 \
+            --low_complexity_filter --complexity_threshold 10 --failed_out "$input_dir/lowcomplexity_${sample}.fastq" |
+        chopper -t 8 -l 150 -q "$QSCORE" > "basecall/${sample}.fastq"
+        NanoStat --fastq "basecall/${sample}.fastq" > "basecall/stats_${sample}"
+        colored_text 32 "You may find demultiplexed reads for ${barcode}, with minimum QSCORE of ${QSCORE}, @ basecall/${sample}.fastq"
+        log "INFO" "Quality filtering, trimming, and stats generation completed for sample $sample"
+        log "INFO" "Demultiplexed reads for ${barcode}, with minimum QSCORE of ${QSCORE}, saved @ basecall/${sample}.fastq"
+    done
+    log "INFO" "process_barcodes function completed successfully"
+}
+
+# Function to perform dorado basecalling
+dorado_basecalling() {
+  local pod5_dir=$1
+  local model=$2
+  local output_dir=$3
+  local sample=$4
+  local dir=$PWD
+  log "INFO" "Starting dorado_basecalling function"
+  log "DEBUG" "Arguments: pod5_dir=$pod5_dir, model=$model, output_dir=$output_dir, sample=$sample"
+  log "DEBUG" "Current directory: $dir"
+
+  # Run dorado basecaller with the provided arguments
+  if grep -q "barcode" "${DIRECTORY}"/settings; then
+    log "INFO" "Barcodes found in settings file. Preparing for barcoded basecalling."
+	colored_text 34 "Barcodes found in the file. You will need to validate sample associations after basecalling"
+	mkdir -p "${dir}"/basecall/doradoCall/demux
+    log "DEBUG" "Created directory: ${dir}/basecall/doradoCall/demux"
+    log "INFO" "Running dorado basecaller for barcoded reads"
+	$dorado basecaller --recursive --device "cuda:all" --emit-fastq --no-trim \
+	"${model}" "${pod5_dir}" > "$output_dir/raw_${sample}".fastq
+    log "INFO" "Dorado basecalling completed. Output: $output_dir/raw_${sample}.fastq"
+    log "INFO" "Running dorado demultiplexing"
+    $dorado demux --kit-name "$5" --output-dir "$output_dir/demux" --emit-fastq "$output_dir/raw_${sample}.fastq" --no-trim
+	# Renaming unclassified file to have the same basename
+	mv "$output_dir/demux"/unclassified.fastq "$output_dir/demux"/"$5"_unclassified.fastq 
+    log "INFO" "Dorado demultiplexing completed. Output directory: $output_dir/demux"
+	# Process barcodes
+    log "INFO" "Calling process_barcodes function"
+    process_barcodes "$QSCORE" "$5"
+  else
+    log "INFO" "No barcodes found in settings. Processing non-barcoded reads."
+	echo "Running basecaller for non-barcoded reads..."
+	mkdir -p "${dir}"/basecall/doradoCall/
+    log "DEBUG" "Created directory: ${dir}/basecall/doradoCall/"
+    log "INFO" "Running dorado basecaller for non-barcoded reads"
+	$dorado basecaller --recursive --device "cuda:all" --emit-fastq --trim all \
+	"${model}" "${pod5_dir}" > "$output_dir/raw_${sample}".fastq
+    log "INFO" "Dorado basecalling completed. Output: $output_dir/raw_${sample}.fastq"
+    log "INFO" "Running porechop, fastp, and chopper for read processing"
+	porechop -i "$output_dir"/raw_${sample}.fastq --min_split_read_size 150 \
+	--end_threshold 95 --extra_middle_trim_good_side 5 --extra_middle_trim_bad_side 15 | 
+    fastp --stdin --stdout --disable_adapter_trimming --dont_eval_duplication --qualified_quality_phred "${QSCORE}" \
+	--length_required 150 --html "$output_dir"/fastp_${sample}.html --thread 8 \
+	--low_complexity_filter --complexity_threshold 10 --failed_out "$output_dir"/lowcomplexity_${sample}.fastq |
+	chopper -t 8 -l 150 -q "${QSCORE}" > "basecall/${sample}".fastq
+    log "INFO" "Read processing completed. Output: basecall/${sample}.fastq"
+    NanoStat --fastq "basecall/${sample}.fastq" > "basecall/stats_${sample}"
+    log "INFO" "NanoStat completed. Statistics saved to: basecall/stats_${sample}"
+	colored_text 32 "You may find your trimmed reads, with minimum QSCORE of ${QSCORE}, @ basecall/${sample}.fastq"
+    log "INFO" "Trimmed reads with minimum QSCORE of ${QSCORE} available at: basecall/${sample}.fastq"
+  fi
+  log "INFO" "dorado_basecalling function completed successfully"
+}
+
+# Function to perform guppy basecalling
+guppy_basecalling() {
+  local pod5_dir=$1
+  local model=$2
+  local output_dir=$3
+  local sample=$4
+  log "INFO" "Starting guppy_basecalling function"
+  log "DEBUG" "Arguments: pod5_dir=$pod5_dir, model=$model, output_dir=$output_dir, sample=$sample"
+
+  # Run guppy basecaller with the provided arguments
+  if grep -q "barcode" "${DIRECTORY}"/settings; then
+    log "INFO" "Barcodes found in settings file. Preparing for barcoded basecalling."
+	colored_text 34 "Barcodes found in the file. You will need to validate sample associations after basecalling"
+	mkdir -p basecall/guppyCall/demux basecall/guppyCall/raw
+    log "DEBUG" "Created directory: basecall/guppyCall/demux"
+    log "INFO" "Running guppy basecaller for barcoded reads"
+	$guppy_basecaller -r -i "$pod5_dir" -s "$output_dir"/raw -c "$model" --records_per_fastq 0 \
+    --device auto --detect_adapter --detect_mid_strand_adapter --trim_strategy 'dna' --disable_qscore_filtering \
+    --do_read_splitting --disable_pings --gpu_runners_per_device 6 --num_read_splitting_threads 6
+	rm "$output_dir"/raw/*.log "$output_dir"/guppy*.log
+    log "INFO" "Guppy basecalling completed. Output at: $output_dir/raw"
+    log "INFO" "Running guppy barcoder"
+	$guppy_barcoder -r -i "$output_dir"/raw -s "$output_dir"/demux --fastq_out --records_per_fastq 0 \
+	--device auto --worker_threads 8 --barcode_kits "$5" --min_score_barcode_front 70 --allow_inferior_barcodes \
+	--detect_adapter --detect_barcodes --detect_mid_strand_adapter --detect_mid_strand_barcodes \
+	--trim_adapters --enable_trim_barcodes --num_barcoding_threads 8 --disable_pings
+    log "INFO" "Guppy demultiplexing completed. Output directory: $output_dir/demux"
+	# Process barcodes
+    log "INFO" "Calling process_barcodes function"
+    process_barcodes "$QSCORE" "$5"
+  else
+    log "INFO" "No barcodes found in settings. Processing non-barcoded reads."
+	echo "Running basecaller for non-barcoded reads..."
+	mkdir -p basecall/guppyCall
+    log "DEBUG" "Created directory: basecall/guppyCall/"
+    log "INFO" "Running guppy basecaller for non-barcoded reads"
+	$guppy_basecaller -r -i "${pod5_dir}" -s "$output_dir" -c "${model}" --records_per_fastq 0 \
+	--device auto --detect_adapter --detect_mid_strand_adapter --trim_strategy 'dna' --disable_qscore_filtering \
+	--do_read_splitting --trim_adapters --disable_pings --gpu_runners_per_device 6 --num_read_splitting_threads 6
+	rm "$output_dir"/*.log
+    log "INFO" "Guppy basecalling completed. Output at: $output_dir"
+    log "INFO" "Running porechop, fastp, and chopper for read processing"
+	porechop -i $output_dir/fastq_runid_*.fastq --min_split_read_size 150 \
+	--end_threshold 95 --extra_middle_trim_good_side 5 --extra_middle_trim_bad_side 15 | 
+    fastp --stdin --stdout --disable_adapter_trimming --dont_eval_duplication --qualified_quality_phred "${QSCORE}" \
+	--length_required 150 --html "$output_dir"/fastp_${sample}.html --thread 8 \
+	--low_complexity_filter --complexity_threshold 10 --failed_out "$output_dir"/lowcomplexity_${sample}.fastq |
+	chopper -t 8 -l 150 -q "${QSCORE}" > "basecall/${sample}".fastq
+    log "INFO" "Read processing completed. Output: basecall/${sample}.fastq"
+	NanoStat --fastq "basecall/${sample}.fastq" > "basecall/stats_${sample}"
+    log "INFO" "NanoStat completed. Statistics saved to: basecall/stats_${sample}"
+	colored_text 32 "You may find your trimmed reads, with minimum QSCORE of ${QSCORE}, @ basecall/${sample}.fastq"
+    log "INFO" "Trimmed reads with minimum QSCORE of ${QSCORE} available at: basecall/${sample}.fastq"
+  fi
+  log "INFO" "guppy_basecalling function completed successfully"
+}
+
+########################################	MAIN BASECALLING SCRIPT LOGIC	########################################
+
+kill_dorado_process
+
+# Determine basecalling model to use
+log "INFO" "Determining basecalling model based on technology: $TECHNOLOGY"
+if [[ "$TECHNOLOGY" = "R10" ]]; then
+    if [[ "$BASECALLER" = "dorado" ]]; then
+		log "INFO" "Using dorado basecaller for R10 technology"
+        if [[ "$MODEL" = "latest" ]]; then
+    		dorado_basecalling "$POD5" "/home/$specific_user/soft/ONT/dorado-0.7.3/models/dna_r10.4.1_e8.2_400bps_sup@v5.0.0" "basecall/doradoCall" "$SAMPLE" "$KIT"
+		else
+            dorado_basecalling "$POD5" "/home/$specific_user/soft/ONT/dorado-0.7.3/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0" "basecall/doradoCall" "$SAMPLE" "$KIT"
+        fi
+    else
+		log "INFO" "Using guppy basecaller for R10 technology"
+		guppy_basecalling "$POD5" "dna_r10.4.1_e8.2_400bps_5khz_sup.cfg" "basecall/guppyCall" "$SAMPLE" "$KIT"
+    fi
+else
+    if [[ "$BASECALLER" = "dorado" ]]; then
+		log "INFO" "Using dorado basecaller for non-R10 technology"
+        dorado_basecalling "$POD5" "/home/$specific_user/soft/ONT/dorado-0.7.3/models/dna_r9.4.1_e8_sup@v3.6" "basecall/doradoCall" "$SAMPLE" "$KIT"
+    else
+        log "INFO" "Using guppy basecaller for non-R10 technology"
+		guppy_basecalling "$POD5" "dna_r9.4.1_450bps_sup.cfg" "basecall/guppyCall" "$SAMPLE" "$KIT"
+    fi
+fi
+rm fastp.json
+log "INFO" "Basecalling process completed"
+echo ""
