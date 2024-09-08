@@ -1,0 +1,466 @@
+#!/bin/bash
+# ============================================================================
+# Customizable local Blast run
+# ============================================================================
+#
+# Usage:
+#   local-blast -i [pod5|file] <directory|filepath>
+#
+# Requirements:
+#   - Conda environment with all necessary tools installed
+#   - Sufficient computational resources (CPU, RAM, GPU for basecalling)
+#
+# Notes:
+#   - This script streamlines local BLAST analysis, tailored for various input formats
+#     and customizable parameters.
+#   - This script is designed to be user-friendly for teammates with limited Linux experience.
+#   - Some parameters will be prompted interactively for ease of use.
+#   - For advanced users, refer to the help message for more customization options.
+#
+# Author: Cristina S. Mesquita
+# Date: September 2024
+# Version: 1.0
+#
+# ============================================================================
+
+# Function to display help message
+display_help() {
+    cat << EOF
+============================================================================
+Customizable local Blast run
+============================================================================
+
+Description:
+  This script automates a local blast run, considering the core-nt database.
+  You may basecall pod5 files or indicate the fastq/fasta file to blast.
+  Parameters are customizable and filtering by specific taxid(s) is available.
+  You may abort this script by pressing 'Ctrl+Shift+C'.
+
+Usage:
+  local-blast [OPTIONS] -i input
+
+Arguments:
+  -i,--input       Specify input for the script. Must be either 'pod5' or 'file'
+  path             Path to pod5 folder or to specific fasta/Fastq file to blast
+
+Options:
+  -h, --help       Display this help message and exit
+  -t, --threads    Number of threads to use (default: 16)
+  -q, --qscore     Minimum quality score for reads (default: 7)
+  --host,--human   Mapping to host and/or human genome before blast search.                   
+  -task            Task to execute among: megablast, dc-megablast and blastn (default: dc-megablast)
+  -out             Output file name (default: $SAMPLE.blast)
+  -evalue          Expectation value (E) threshold to save hits (default: 0.01)
+  -max_target_seqs Maximum number of aligned sequences to keep. Value of 5 or more is recommended (default: 10)
+  -perc_identity   Percent identity (default: 40)
+  -qcov_hsp_perc   Percent query coverage per hsp (default: 35)
+  -t, --taxid      Taxonomy taxid(s) to restrict the blast search of core-nt (and their descendants)
+                   Multiple IDs should be delimited by ',' with no space
+  -not, --notaxid  Restrict the blast search to everything except the specificied taxonomy IDs (and their descendants)
+                   Multiple IDs should be delimited by ',' with no space
+
+Examples:
+  $0 --human --input pod5 "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001"
+  $0 -t 20 -not 9606 -i pod5 "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001"
+  $0 -i file "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001/basecall/sTRIAL0001.fastq"
+  $0 --taxid 620,561 --input file sTRIAL0001_toblast.fasta
+
+============================================================================
+EOF
+}
+
+# Detect the computer the script is being run to adjust the directories
+current_user=$(whoami)
+machine_name=$(hostname)
+echo "$current_user @$machine_name"
+
+if [[ "$machine_name" == "i3cris" ]]; then
+    specific_user="cris"
+elif [[ "$machine_name" == "i3SDiag-06u" ]]; then
+    specific_user="i3sdiag"
+else
+    specific_user="$current_user"
+fi
+
+# Database paths
+KRAKEN2DB="/media/U/#Bioinformatics/DBs/kraken2/littlePablos"
+BLAST_DB="/media/U/#Bioinformatics/DBs/Blast_core_nt/core_nt"
+MEMORY_DB="/dev/shm"
+#HUMAN_GENOME="/media/U/#Bioinformatics/DBs/GRCh38.p14.fna"
+HUMAN_GENOME="/media/U/#Bioinformatics/DBs/kraken2/human.fna"
+# ----------------------------------------------------------------------------
+
+# Function to display colored text
+colored_text() {
+    color=$1
+    text=$2
+    echo -e "\e[${color}m${text}\e[0m"
+}
+
+# Function to display yellow text
+yellow_text() {
+    colored_text 33 "$1"
+}
+
+# Logging setup with dynamic filename
+SCRIPT_NAME=$(basename "$0" .sh)
+TIMESTAMP=$(date +"%y%m%d-%H%M")  # Changed to YYMMDD_HHM format
+LOG_DIR="/media/U/#Bioinformatics/.logfiles"
+LOG_FILE="${LOG_DIR}/${SCRIPT_NAME}-${TIMESTAMP}.log"
+
+# Logging function
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "$timestamp [$level] $message" >> "$LOG_FILE"
+}
+
+# Function to log tool versionS
+log_tool_versions() {
+    log "INFO" "Tool Versions:"
+    log "INFO" "  blastn: $(blastn -version 2>&1 | head -n1)"
+    log "INFO" "  reformat: $(reformat.sh -h 2>&1 | head -n3 | tail -n1)"
+    log ""
+}
+
+# Function to activate conda environment
+activate_conda() {
+  source /home/$specific_user/soft/miniconda3/etc/profile.d/conda.sh
+  CONDA_ENV_NAME="ont-diag"
+  conda activate "$CONDA_ENV_NAME"
+  if [[ $? -ne 0 ]]; then
+    colored_text 31 "Error: Failed to activate conda environment ${CONDA_ENV_NAME}."
+    exit 1
+  fi
+  # Ensure correct PATH
+  #CONDA_PATH="/home/$specific_user/soft/miniconda3"
+  #export PATH="${CONDA_PATH}/bin:$PATH"
+  #conda env config vars set BLASTDB="/media/U/#Bioinformatics/DBs/Blast_core_nt"
+  # make sure this has been run previously and the environment re-activated to take effect
+}
+
+# Parse command line arguments
+parse_arguments() {
+    INPUT=""
+    PATH=""
+    THREADS=16 
+    QSCORE=7
+    HOST_REMOVAL=""
+    HUMAN_REMOVAL=""
+    TASK="dc-megablast"
+    EVALUE=0.01
+    MAXTARGETS=10
+    PERCID=40
+    QCOV=35
+    OUT=""
+    TAXID=""
+    NOTAXID=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                display_help
+                exit 0
+                ;;
+            -i|--input pod5|file)
+                INPUT="$1"
+                log "INFO" "Setting input type to $INPUT"
+                shift
+                ;;
+            -t|--threads)
+                t="$2"
+                log "INFO" "Setting threads to $THREADS"
+                shift 2
+                ;;
+            -q|--qscore)
+                QSCORE="$2"
+                log "INFO" "Setting minimum Q-score to $QSCORE"
+                shift 2
+                ;;
+            --host)
+                HOST_REMOVAL="yes"
+                log "INFO" "Setting host removal to yes"
+                ;;
+            --human)
+                HUMAN_REMOVAL="yes"
+                log "INFO" "Setting human removal to yes"
+                ;;
+            -out)
+                OUT="$2"
+                log "INFO" "Setting output filename to $OUT"
+                shift 2
+                ;;
+            -task)
+                TASK="$2"
+                log "INFO" "Setting BLAST task to $TASK"
+                shift 2
+                ;;
+            -evalue)
+                EVALUE="$2"
+                log "INFO" "Setting E-value threshold to $EVALUE"
+                shift 2
+                ;;
+            -max_target_seqs)
+                MAXTARGETS="$2"
+                log "INFO" "Setting maximum target sequences to $MAXTARGETS"
+                shift 2
+                ;;
+            -perc_identity)
+                PERCID="$2"
+                log "INFO" "Setting percent identity to $PERCID"
+                shift 2
+                ;;
+            -qcov_hsp_perc)
+                QCOV="$2"
+                log "INFO" "Setting query coverage per HSP to $QCOV"
+                shift 2
+                ;;
+            -t|--taxid)
+                TAXID="$2"
+                log "INFO" "Setting tax ID(s) to $TAXID"
+                shift 2
+                ;;
+            -not|--notaxid)
+                log "INFO" "Setting excluded tax ID(s) to $NOTAXID"
+                NOTAXID="$2"
+                shift 2
+                ;;
+            *)
+                PATH="$1"
+                log "INFO" "Setting path to $PATH"
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$INPUT" ]; then
+        echo "Error: Input type (pod5 or file) must be specified."
+        display_help
+        exit 1
+    fi
+
+    if [ -z "$PATH" ]; then
+        echo "Error: Path either to pod5 direcotry or to specific file must be specified."
+        display_help
+        exit 1
+    fi
+
+    activate_conda
+    log_tool_versions
+    # Prompt for taxonomic filtering and basecaller/model if necessary
+    prompt_user
+}
+
+# Function to prompt the user for additional parameters
+prompt_user() {
+    # Prompt for taxonomic filtering if not specified
+    if [[ -z "$TAXID" && -z "$NOTAXID" ]]; then
+        read -p "$(yellow_text 'Do you want to restrict or exclude specific taxIDs (and their descendants) from the BLAST search (yes/no)? ')" -n 1 -r ANSWER
+        if [[ "$ANSWER" = "yes" ]]; then
+            read -p "$(yellow_text 'Specify intent (restrict|exclude) and taxids (separate multiple IDs with a comma, no spaces: eg. restrict 621,520): ')" SEARCHIDS
+            # Parse the SEARCHIDS string into intent and taxIDs
+            IFS=', ' read -r intent taxIDs <<<"$SEARCHIDS"
+            # Validate the intent and taxIDs
+            if [[ "$intent" != "restrict" && "$intent" != "exclude" ]]; then
+                echo "Invalid intent. Please specify 'restrict' or 'exclude'."
+                exit 1
+            fi
+            if [[ ! "$taxIDs" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+                echo "Invalid taxIDs. Please enter valid numerical IDs separated by commas."
+                exit 1
+            fi
+            # Set the TAXID or NOTAXID variable based on the intent
+            if [[ "$intent" = "restrict" ]]; then
+                TAXID="$taxIDs"
+            else
+                NOTAXID="$taxIDs"
+            fi
+        fi
+    fi
+
+    # Prompt for basecaller, model and potential cleanup steps if input is pod5
+    if [[ "$INPUT" == "pod5" ]]; then
+        read -p "Enter basecaller (dorado or guppy): " BASECALLER
+        DIRECTORY="${PATH}"
+        if [[ -n "$MODEL" ]]; then
+            basecall --threads "$THREADS" --qscore "$QSCORE" --model "$MODEL" "$BASECALLER"
+        else
+            basecall --threads "$THREADS" --qscore "$QSCORE" "$BASECALLER"
+        fi
+        log "INFO" "Determining minimap2 preset based on technology: $TECHNOLOGY"
+        if [[ "$TECHNOLOGY" = "R10" ]]; then
+            m2preset="lr:hq"
+            log "INFO" "Using m2preset: $m2preset for R10 technology"
+        else
+            m2preset="map-ont"
+            log "INFO" "Using m2preset: $m2preset for non-R10 technology"
+        fi
+        if [[ -z "$HOST_REMOVAL" ]]; then
+            read -p "$(yellow_text 'Do you intend to remove host reads (non-human)? (yes/no) ')" HOST_REMOVAL
+            HOST_REMOVAL=$(echo "$HOST_REMOVAL" | tr '[:upper:]' '[:lower:]') # convert to lowercase
+            log "DEBUG" "User input for host removal: ${HOST_REMOVAL}"
+        fi
+        if [[ -z "$HUMAN_REMOVAL" ]]; then
+            read -p "$(yellow_text 'Do you wish to remove human reads? (yes/no) ')" HUMAN_REMOVAL
+            HUMAN_REMOVAL=$(echo "$HUMAN_REMOVAL" | tr '[:upper:]' '[:lower:]') # convert to lowercase
+            log "DEBUG" "User input for human removal: ${HUMAN_REMOVAL}"
+        fi
+        DATASETS="${BASE_DIR}"/basecall
+    fi
+}
+
+parse_arguments "$@"
+# Start logging
+if [ "$1" != "-h" ] && [ "$1" != "--help" ]; then
+    log "DEBUG" "Script started with arguments: $*"
+fi
+
+########################################	FUNCTION DEFINITION		########################################
+
+single_host_removal() {
+	cd "${BASE_DIR}"
+	mkdir -p analysis/hostremoval
+	cd analysis/hostremoval || exit 1
+	log "INFO" "Starting single_host_removal function, with $m2preset as minimap2 preset"
+	read -p "$(yellow_text 'Please input the full directory to the fasta/fna genome file of the host: ')" HOST
+	log "INFO" "Host genome file: $HOST"
+	for file in "${DATASETS}"/*.fastq; do
+		sample=$(basename "$file" .fastq)
+		log "INFO" "Processing sample: $sample"
+		echo "   Mapping reads for $sample against the Host genome"
+		minimap2 -t 8 -ax $m2preset "${HOST}" "${file}" -o ${sample}_host.sam
+		samtools fastq -@ 16 -n -f 4 ${sample}_host.sam > ${sample}_notHost.fastq
+		#samtools fastq -@ 16 -n -F 4 ${sample}_host.sam > ${sample}_Host.fastq
+	done
+	colored_text 32 "   Host-associated reads have now been removed"
+	log "INFO" "Host removal completed successfully"
+	cd "${BASE_DIR}" || exit 1
+}
+
+human_removal() {
+	cd "${BASE_DIR}"
+    mkdir -p analysis/hostremoval
+    cd analysis/hostremoval || exit 1
+	log "INFO" "Starting human_removal function, with $m2preset as minimap2 preset"
+    rsync -a --progress "${KRAKEN2DB}/onlyHuman"/*k2d "${MEMORY_DB}"
+    log "INFO" "Copied onlyHuman database to memory"
+	for file in "${DATASETS}"/*.fastq; do
+		sample=$(basename "$file" .fastq)
+		echo "   Mapping reads for $sample against the Human genome"
+        if ls "${sample}_notHost.fastq" 1> /dev/null 2>&1; then
+            INPUT_FILE="${sample}_notHost.fastq"
+        else
+            INPUT_FILE="${DATASETS}/${sample}.fastq"
+        fi
+		log "INFO" "Input file: $INPUT_FILE"
+		log "INFO" "Mapping $sample to human genome with minimap2"
+        minimap2 -t 8 -ax $m2preset "${HUMAN_GENOME}" "${INPUT_FILE}" -o "${sample}"_human.sam
+        samtools fastq -@ 16 -n -f 4 "${sample}_human.sam" > "${sample}"_notHuman.fastq
+        #samtools fastq -@ 16 -n -F 4 "${sample}_human.sam" > "${sample}"_Human.fastq
+        log "INFO" "Running Kraken2 for $sample. Arguments: confidence=0.1, minimum-hit-groups=4"
+        input_file="${BASE_DIR}"/analysis/hostremoval/"${sample}"_notHuman.fastq
+        kraken2 --db "${MEMORY_DB}" --threads $THREADS --confidence 0.1 --report "${sample}".k2report --memory-mapping --use-names --report-minimizer-data --minimum-hit-groups 4 \
+            --unclassified-out "${sample}".k2unc --classified-out "${sample}.k2class" "${input_file}" 2>> "${sample}".log > "${sample}".k2
+    done
+    colored_text 32 "   Human-associated reads have now been removed"
+	log "INFO" "Removing temporary database files from memory"
+	rm /dev/shm/*k2d
+    log "INFO" "Human removal completed successfully"
+}
+
+# BlastN
+blast_core_nt() {
+	original_dir=$(pwd)
+    t=16
+	log "INFO" "Starting blast_core_nt function"
+    log "INFO" "Running Blast for $sample versus the core_nt database"
+	log "INFO" "Output file will these filtered hits: max_target_seqs=10, evalue=0.01, perc_identity=40, qcov_hsp_perc=35"
+    # to make sure taxonomy works
+    cd "/media/U/#Bioinformatics/DBs/Blast_core_nt"
+        read -p "$(yellow_text 'Do you want to restrict or exclude specific taxIDs from the BLAST search (yes/no)? ')" -n 1 -r ANSWER
+    if [[ -z "$OUT" ]]; then
+        OUT="${sample}.blast"
+    fi
+    if [[ -n "$TAXID" ]]; then
+        log "INFO" "$TASK search versus the core_nt database will be restricted to the following taxonomic IDs: $TAXID"
+		blastn -task $TASK -num_threads "$t" -db "${BLAST_DB}" -taxids $TAXID -query "${original_dir}"/${BLASTFILE} \
+			-outfmt '6 qseqid sseqid sscinames scomnames qstart qend sstart send mismatch gaps gapopen length pident qcovs qcovhsp qcovus evalue bitscore' \
+			-max_target_seqs $MAXTARGETS -evalue $EVALUE -perc_identity $PERCID -qcov_hsp_perc $QCOV -out "${original_dir}/"$OUT
+    elif [[ -n "$NOTAXID" ]]; then
+        log "INFO" "$TASK search versus the core_nt database will exclude the following taxonomic IDs: $NOTAXID"
+		blastn -task $TASK -num_threads "$t" -db "${BLAST_DB}" -negative_taxids $NOTAXID -query "${original_dir}"/${BLASTFILE} \
+			-outfmt '6 qseqid sseqid sscinames scomnames qstart qend sstart send mismatch gaps gapopen length pident qcovs qcovhsp qcovus evalue bitscore' \
+			-max_target_seqs $MAXTARGETS -evalue $EVALUE -perc_identity $PERCID -qcov_hsp_perc $QCOV -out "${original_dir}/"$OUT
+    else
+        log "INFO" "$TASK search versus the full core_nt database"
+		blastn -task $TASK -num_threads "$t" -db "${BLAST_DB}" -query "${original_dir}"/${BLASTFILE} \
+			-outfmt '6 qseqid sseqid sscinames scomnames qstart qend sstart send mismatch gaps gapopen length pident qcovs qcovhsp qcovus evalue bitscore' \
+			-max_target_seqs $MAXTARGETS -evalue $EVALUE -perc_identity $PERCID -qcov_hsp_perc $QCOV -out "${original_dir}/"$OUT
+    fi
+    sed -i '1i qseqid\tsseqid\tsscinames\tscomnames\tqstart\tqend\tsstart\tsend\tmismatch\tgaps\tgapopen\tlength\tpident\tqcovs\tqcovhsp\tqcovus\tevalue\tbitscore' "${original_dir}/${OUT}"
+    log "INFO" "Edited blast output file to contain headers".
+	colored_text 32 "Blast has finished. Output @ ${original_dir}/blast/${sample}.blast"
+	colored_text 32 "Headers: readid, seqid, sciname, commonname, qstart, qend, sstart, send, mismatch, gaps, gapopen, length, pident, qcovs, qcovhsp, qcovus, evalue, bitscore"
+    log "INFO" "Blast_core_nt function completed successfully"
+}
+
+########################################	MAIN SCRIPT		########################################
+
+cd "${BASE_DIR}"
+mkdir -p analysis
+cd analysis
+LOOKUPDIR="${BASE_DIR}/basecall"
+
+if [[ "$INPUT" == "pod5" ]]; then
+    if [[ "$HOST_REMOVAL" == "yes" ]]; then
+        single_host_removal
+        LOOKUPDIR="${BASE_DIR}/analysis/hostremoval"
+    fi
+    if [[ "$HUMAN_REMOVAL" == "yes" ]]; then
+        human_removal
+        LOOKUPDIR="${BASE_DIR}/analysis/hostremoval"
+    fi
+    mkdir blast
+    cd blast || { log "ERROR" "Cannot change to directory blast"; colored_text 31 "Error: Cannot change to directory blast"; exit 1; }
+	log "INFO" "Lookup dir: $LOOKUPDIR"
+    for file in "${BASE_DIR}/basecall"/*.fastq; do
+		sample=$(basename "$file" ".fastq")
+        if ls "${sample}.k2unc" 1> /dev/null 2>&1; then
+            INPUT_FILE="${sample}.k2unc"
+        elif ls "${sample}_notHost.fastq" 1> /dev/null 2>&1; then
+            INPUT_FILE="${sample}_notHost.fastq"
+        else
+            INPUT_FILE="${BASE_DIR}/basecall"/${sample}.fastq
+        fi
+		log "INFO" "Input FASTQ file: $INPUT_FILE"
+        echo "Converting ${INPUT_FILE} to fasta"
+        log "INFO" "Converting $file to fasta, considering minimum length of 250bp"
+        reformat.sh in="${INPUT_FILE}" out=${sample}_toblast.fasta minlength=250 ow=t uniquenames=t
+    done
+    BLASTFILE=${sample}_toblast.fasta
+else
+    file_dir=$(dirname "$PATH")
+    cd "$file_dir"
+    log "INFO" "Creating blast folder in diretory $file_dir"
+    mkdir blast
+    cd blast || { log "ERROR" "Cannot change to directory blast"; colored_text 31 "Error: Cannot change to directory blast"; exit 1; }
+    head -n 1 "${PATH}" > first_line
+    if [[ "$first_line" =~ ^> ]]; then
+        log "INFO" "Input file $PATH determined to be in FASTA format and is ready to blast."
+        BLASTFILE="$(basename "$PATH" .fasta)"
+    elif [[ "$first_line" =~ ^@ ]]; then
+        log "INFO" "Input file $PATH determined to be in FASTQ format and requires conversion."
+        echo "Converting ${PATH} to fasta"
+        log "INFO" "Converting $PATH to fasta, considering minimum length of 250bp"
+        sample=$(basename "$PATH" ".fastq|.k2class|.k2unc")
+        reformat.sh in="${PATH}" out=${sample}_toblast.fasta minlength=250 ow=t uniquenames=t
+        BLASTFILE=${sample}_toblast.fasta
+    else
+        echo "The file is not in FASTA or FASTQ format."
+        exit 1
+    fi
+fi
+
+blast_core_nt
+colored_text 32 "\nAll done!"
