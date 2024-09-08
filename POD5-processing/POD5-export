@@ -1,0 +1,266 @@
+#!/bin/bash
+# ============================================================================
+# Exporting POD5 files to remote server U
+# ============================================================================
+#
+# Usage:
+#   POD5-export experiment sample
+#
+# Requirements:
+#   - Conda environment with all necessary tools installed
+#   - Input data in the specified directories
+#
+# Notes:
+#   - Script was edited to account for adaptive sampling flag in POD5 files
+#   - It has been updated to not overwrite files when exporting multiple runs
+#     for a specific combination of $EXPERIMENT AND $SAMPLE
+#
+# Author: Cristina S. Mesquita
+# Date: June 2024
+# Version: 1.1
+#
+# ============================================================================
+
+# Function to display help message
+display_help() {
+    cat << EOF
+============================================================================
+Exporting POD5 files
+============================================================================
+
+Description:
+  This script exports pod5 files to U/RemoteAnalysis, accounting for adaptive
+  sampling flag.
+  You may abort this script by pressing 'Ctrl+Shift+C'.
+
+Usage:
+  $0 <experiment> <sample>
+
+Arguments:
+  experiment    Experiment name (eg. OMWGS24010001)
+  sample	Sample name (eg. sTRIAL0001)
+
+============================================================================
+EOF
+}
+
+# Detect the computer the script is being run to adjust the directories
+current_user=$(whoami)
+machine_name=$(hostname)
+echo "$current_user @$machine_name"
+
+if [[ "$machine_name" == "i3cris" ]]; then
+    specific_user="cris"
+elif [[ "$machine_name" == "i3SDiag-06u" ]]; then
+    specific_user="i3sdiag"
+else
+    specific_user="$current_user"
+fi
+
+# Function to display colored text
+colored_text() {
+    color=$1
+    text=$2
+    echo -e "\e[${color}m${text}\e[0m"
+}
+
+# Function to display yellow text
+yellow_text() {
+    colored_text 33 "$1"
+}
+
+# Logging setup with dynamic filename
+SCRIPT_NAME=$(basename "$0" .sh)
+TIMESTAMP=$(date +"%y%m%d-%H%M")  # Changed to YYMMDD_HHM format
+LOG_DIR="/media/U/#Bioinformatics/.logfiles"
+LOG_FILE="${LOG_DIR}/${SCRIPT_NAME}-${TIMESTAMP}.log"
+
+# Logging function
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "$timestamp [$level] $message" >> "$LOG_FILE"
+}
+
+# Function to log tool versionS
+log_tool_versions() {
+    log "INFO" "Tool Versions:"
+    log "INFO" "  pod5 format tools: $(pod5 -v)"
+    log "INFO" "  rsync: $(rsync --version 2>&1 | head -n1)"
+    log "INFO" "  python: $(python3 --version)"
+    log ""
+}
+
+# Function to activate conda environment
+activate_conda() {
+  source /home/$specific_user/soft/miniconda3/etc/profile.d/conda.sh
+  CONDA_ENV_NAME="ont-diag"
+  log "DEBUG" "Activating conda environment: $CONDA_ENV_NAME"
+  conda activate "$CONDA_ENV_NAME"
+  if [[ $? -ne 0 ]]; then
+    colored_text 31 "Error: Failed to activate conda environment ${CONDA_ENV_NAME}."
+	log "ERROR" "Failed to activate conda environment ${CONDA_ENV_NAME}."
+    exit 1
+  fi
+  log "INFO" "Conda environment activated successfully"
+  # Ensure correct PATH
+  #CONDA_PATH="/home/$specific_user/soft/miniconda3"
+  #export PATH="${CONDA_PATH}/bin:$PATH"
+}
+
+# Parse command line arguments
+parse_arguments() {
+    # Check if help is requested
+    if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+        display_help
+        exit 0
+    fi
+	 # If we've reached here, we're not just displaying help, so we should log
+    log "DEBUG" "Parsing arguments: $@"
+    # Check if the correct number of arguments is provided
+    if [ $# -ne 2 ]; then
+        colored_text 31 "Error: Incorrect number of arguments."
+        log "ERROR" "Incorrect number of arguments."
+        echo "Usage: $0 <experiment> <sample>"
+        exit 1
+    fi
+    # Assign arguments to variables
+    EXPERIMENT="$1"
+    SAMPLE="$2"
+    # Validate arguments (you can add more specific checks if needed)
+    if [[ -z "$EXPERIMENT" || -z "$SAMPLE" ]]; then
+        colored_text 31 "Error: Both experiment and sample must be provided and non-empty."
+		log "ERROR" "Both experiment and sample must be provided and non-empty."
+        exit 1
+    fi
+    log "INFO" "Arguments parsed successfully: EXPERIMENT=$EXPERIMENT, SAMPLE=$SAMPLE"
+
+    # You can add more specific validation here if needed
+    # For example, checking if the experiment name matches a specific pattern
+    # if [[ ! "$EXPERIMENT" =~ ^OMWGS[0-9]{8}$ ]]; then
+    #     echo "Error: Invalid experiment name format. Expected format: OMWGS followed by 8 digits."
+    #     exit 1
+    # fi
+
+    # Echo the parsed arguments (optional, for verification)
+    # echo "Experiment: $EXPERIMENT"
+    # echo "Sample: $SAMPLE"
+    activate_conda
+    log_tool_versions
+}
+
+parse_arguments "$@"
+log "INFO" "Script started: Exporting POD5 files"
+echo " "
+echo "Hello!"
+echo "I will ask you to define some variables to facilitate following processing..."
+echo " "
+read -p "$(yellow_text 'Full directory in /mnt/ONT (location of fastq and pod5 folders): ')" DIRECTORY
+echo ""
+cd "${DIRECTORY}"
+echo "You currently are working in ${PWD}"
+log "INFO" "Input directory: ${DIRECTORY}"
+log "INFO" "Working directory: ${PWD}"
+
+# Check if the destination directory exists and has contents
+BASE_DIR="/media/U/RemoteAnalysis/$EXPERIMENT/$SAMPLE"
+mkdir -p "$BASE_DIR"
+#echo "${BASE_DIR}"
+#touch /media/U/RemoteAnalysis/directory.remote
+#echo "${BASE_DIR}" > /media/U/RemoteAnalysis/directory.remote
+touch "${BASE_DIR}"/settings
+echo "EXPERIMENT: $EXPERIMENT" > "${BASE_DIR}"/settings
+echo "SAMPLE: $SAMPLE" >> "${BASE_DIR}"/settings
+
+read -p "$(yellow_text 'Is this an R9 or R10 experiment? ')" R
+echo "TECHNOLOGY: $R" >> "${BASE_DIR}"/settings
+
+read -p "$(yellow_text 'Did you use a kit with barcodes (yes/no)? ')" KIT
+if [[ "$KIT" = "no" ]]; then
+    read -p "$(yellow_text 'Kit used (eg. SQK-LSK109): ')" ONT_KIT
+    echo "KIT: $ONT_KIT" >> "${BASE_DIR}"/settings
+	log "DEBUG" "Settings file created with the following additional arguments: TECHNOLOGY: $R, KIT: $ONT_KIT"
+elif [[ "$KIT" = "yes" ]]; then
+    read -p "$(yellow_text 'Barcode kit used (eg. SQK-RBK114-24): ')" ONT_KIT
+	echo "KIT: $ONT_KIT" >> "${BASE_DIR}"/settings
+	echo "barcode" >> "${BASE_DIR}"/settings
+	log "DEBUG" "Settings file created with the following additional arguments: TECHNOLOGY: $R, KIT: $ONT_KIT, barcode"
+else
+	colored_text 31 "Not a viable option. Try again!"
+	#Prompt to press any key before closing the terminal
+	read -n 1 -s -r -p "Press any key to close the terminal..."
+	exit
+fi
+echo ""
+#echo "${PWD}"
+
+# Check if there are any HTML files in the current directory
+if ls *.html 1> /dev/null 2>&1; then
+    # Execute the rsync command if HTML files are found
+    rsync --update -a *.html "${BASE_DIR}"
+    colored_text 32 "Report copied to U/RemoteAnalysis"
+	log "INFO" "Report copied to U/RemoteAnalysis"
+else
+    colored_text 34 "No HTML files found. Guess you are still sequencing... Report not copied."
+	log "INFO" "No HTML files found. Guess you are still sequencing... Report not copied."
+fi
+
+# will process pod5 to account for adaptive sampling
+python3="/home/$specific_user/soft/miniconda3/envs/ont-diag/bin/python3"
+
+# Function to determine correct suffix
+determine_suffix() {
+    base_name="pod5_view"
+    suffix=""
+    count=1
+    while [[ -e "${BASE_DIR}/pod5/${base_name}${suffix}.csv" ]]; do
+        suffix="_${count}"
+        count=$((count + 1))
+    done
+    echo "$suffix"
+	log "DEBUG" "Determined $suffix as suffix."
+}
+
+# Verify if using a suffix is required
+if [ -d "$BASE_DIR/pod5" ] && [ "$(ls -A $BASE_DIR/pod5)" ]; then
+    log "INFO" "Destination pod5 folder already exists and has contents."
+    read -p "$(yellow_text 'Destination pod5 folder already exists and has contents. Do you want to overwrite files (yes/no)? ')" OVERWRITE_CHOICE
+    if [[ "$OVERWRITE_CHOICE" == "no" ]]; then
+		# If the user chooses not to overwrite, add a suffix to the filenames
+		log "INFO" "User has chosen not to overwrite existing files. Generating files with a suffix."
+        suffix=$(determine_suffix)
+    else
+        # If the user chooses to overwrite, proceed as usual
+        log "INFO" "User chose to overwrite existing files."
+        suffix=""
+    fi
+else
+    mkdir -p "$BASE_DIR"/pod5
+    suffix=""
+fi
+
+# Process POD5 files
+log "INFO" "Starting POD5 file processing"
+find . -name "*.pod5" -type f | xargs pod5 view > "${BASE_DIR}/pod5/pod5_view$suffix.csv"
+log "INFO" "POD5 view completed. Output saved to ${BASE_DIR}/pod5/pod5_view${suffix}.csv"
+$python3 "/usr/local/bin/extract-read-ids.py" "${BASE_DIR}/pod5/pod5_view${suffix}.csv" "${BASE_DIR}/pod5/basecall_ids${suffix}.txt" "${BASE_DIR}/pod5/adaptive_ids${suffix}.txt"
+log "INFO" "Read IDs extracted"
+find . -name "*.pod5" -type f | xargs pod5 filter -t 20 -i "${BASE_DIR}/pod5/basecall_ids${suffix}.txt" -o "${BASE_DIR}/pod5/non_adaptive${suffix}.pod5" --force-overwrite
+if [[ -f "${BASE_DIR}/pod5/adaptive_ids${suffix}.txt" ]]; then
+    find . -name "*.pod5" -type f | xargs pod5 filter -t 20 -i "${BASE_DIR}/pod5/adaptive_ids${suffix}.txt" -o "${BASE_DIR}/pod5/adaptive_sampling${suffix}.pod5.excluded" --force-overwrite
+else
+    log "WARNING" "adaptive_ids${suffix}.txt not found. Skipping adaptive sampling POD5 filtering."
+fi
+log "INFO" "POD5 filtering completed"
+if [[ -n "$suffix" ]]; then
+    colored_text 32 "Files generated with suffix $suffix to avoid overwriting."
+else
+    colored_text 32 "Files processed in the destination folder."
+fi
+
+colored_text 32 "POD5 files are now accessible and may be basecalled."
+colored_text 34 "If you wish to perform any validation on the reads removed by adaptive sampling, consider the adaptive_sampling.pod5.excluded file(s)."
+colored_text 34 "In this case you will need to remove the '.excluded' extension before running the basecall script."
+date
+log "INFO" "POD5 export completed successfully"
