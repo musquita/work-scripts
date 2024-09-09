@@ -25,48 +25,46 @@
 
 # Function to display help message
 display_help() {
-    cat << EOF
-============================================================================
-Customizable local Blast run
-============================================================================
-
-Description:
-  This script automates a local blast run, considering the core-nt database.
-  You may basecall pod5 files or indicate the fastq/fasta file to blast.
-  Parameters are customizable and filtering by specific taxid(s) is available.
-  You may abort this script by pressing 'Ctrl+Shift+C'.
-
-Usage:
-  local-blast [OPTIONS] -i input
-
-Arguments:
-  -i,--input       Specify input for the script. Must be either 'pod5' or 'file'
-  path             Path to pod5 folder or to specific fasta/Fastq file to blast
-
-Options:
-  -h, --help       Display this help message and exit
-  -t, --threads    Number of threads to use (default: 16)
-  -q, --qscore     Minimum quality score for reads (default: 7)
-  --host,--human   Mapping to host and/or human genome before blast search.                   
-  -task            Task to execute among: megablast, dc-megablast and blastn (default: dc-megablast)
-  -out             Output file name (default: $SAMPLE.blast)
-  -evalue          Expectation value (E) threshold to save hits (default: 0.01)
-  -max_target_seqs Maximum number of aligned sequences to keep. Value of 5 or more is recommended (default: 10)
-  -perc_identity   Percent identity (default: 40)
-  -qcov_hsp_perc   Percent query coverage per hsp (default: 35)
-  -t, --taxid      Taxonomy taxid(s) to restrict the blast search of core-nt (and their descendants)
-                   Multiple IDs should be delimited by ',' with no space
-  -not, --notaxid  Restrict the blast search to everything except the specificied taxonomy IDs (and their descendants)
-                   Multiple IDs should be delimited by ',' with no space
-
-Examples:
-  $0 --human --input pod5 "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001"
-  $0 -t 20 -not 9606 -i pod5 "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001"
-  $0 -i file "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001/basecall/sTRIAL0001.fastq"
-  $0 --taxid 620,561 --input file sTRIAL0001_toblast.fasta
-
-============================================================================
-EOF
+echo "============================================================================"
+echo "Customizable local Blast run"
+echo "============================================================================"
+echo ""
+echo "Description:"
+echo "  This script automates a local blast run, considering the core-nt database."
+echo "  You may basecall pod5 files or indicate the fastq/fasta file to blast."
+echo "  Parameters are customizable and filtering by specific taxid(s) is available."
+echo "  You may abort this script by pressing 'Ctrl+Shift+C'."
+echo ""
+echo "Usage:"
+echo "  local-blast [OPTIONS] -i input"
+echo ""
+echo "Arguments:"
+echo "  -i,--input       Specify input for the script. Must be either 'pod5' or 'file'"
+echo "  path             Path to pod5 folder or to specific fasta/Fastq file to blast"
+echo ""
+echo "Options:"
+echo "  -h, --help       Display this help message and exit"
+echo "  -t, --threads    Number of threads to use (default: 16)"
+echo "  -q, --qscore     Minimum quality score for reads (default: 7)"
+echo "  --host,--human   Mapping to host and/or human genome before blast search."
+echo "  -task            Task to execute among: megablast, dc-megablast and blastn (default: dc-megablast)"
+echo "  -out             Output file name (default: SAMPLE.blast)"
+echo "  -evalue          Expectation value (E) threshold to save hits (default: 0.01)"
+echo "  -max_target_seqs Maximum number of aligned sequences to keep. Value of 5 or more is recommended (default: 10)"
+echo "  -perc_identity   Percent identity (default: 40)"
+echo "  -qcov_hsp_perc   Percent query coverage per hsp (default: 35)"
+echo "  -t, --taxid      Taxonomy taxid(s) to restrict the blast search of core-nt (and their descendants)"
+echo "                   Multiple IDs should be delimited by ',' with no space"
+echo "  -not, --notaxid  Restrict the blast search to everything except the specificied taxonomy IDs (and their descendants)"
+echo "                   Multiple IDs should be delimited by ',' with no space"
+echo ""
+echo "Examples:"
+echo '  local-blast --human --input pod5 "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001"'
+echo '  local-blast -t 20 -not 9606 -i pod5 "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001"'
+echo '  local-blast -i file "/media/U/RemoteAnalysis/OMWGS24090001/sTRIAL0001/basecall/sTRIAL0001.fastq"'
+echo '  local-blast --taxid 620,561 --input file sTRIAL0001_toblast.fasta'
+echo ""
+echo "============================================================================"
 }
 
 # Detect the computer the script is being run to adjust the directories
