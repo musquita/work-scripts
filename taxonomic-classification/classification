@@ -83,8 +83,8 @@ HUMAN_GENOME="/media/U/#Bioinformatics/DBs/kraken2/human.fna"
 # Ensuring commands can be run
 python3="/home/$specific_user/soft/miniconda3/envs/ont-diag/bin/python3"
 extractreads="/home/$specific_user/soft/miniconda3/envs/ont-diag/bin/extract_kraken_reads.py"
-combinekreports="/usr/bin/local/combine-sequential-kreports.py"
-combinebracken="/usr/bin/local/combine-sequential-b-outputs.py"
+combinekreports="/usr/local/bin/combine-sequential-kreports.py"
+combinebracken="/usr/local/bin/combine-sequential-b-outputs.py"
 
 # Verify if executables exist
 if [[ ! -x "$combinekreports" || ! -x "$combinebracken" ]]; then
