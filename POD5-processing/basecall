@@ -170,10 +170,16 @@ parse_arguments() {
         log "INFO" "Setting basecaller to $BASECALLER"
         shift
         ;;
-      -m|--model default|latest)
-        MODEL="$2"
-        log "INFO" "Setting model to $MODEL"
-        shift 2
+      -m|--model)
+        if [[ "$2" == "default" || "$2" == "latest" ]]; then
+            MODEL="$2"
+            log "INFO" "Setting model to $MODEL"
+            shift 2
+        else
+            echo "Error: Invalid model specified. Please use 'default' or 'latest'."
+            display_help
+            exit 1
+        fi
         ;;
       *)
         echo "Unknown option: $1"
