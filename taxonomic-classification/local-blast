@@ -163,10 +163,16 @@ parse_arguments() {
                 display_help
                 exit 0
                 ;;
-            -i|--input pod5|file)
-                INPUT="$1"
-                log "INFO" "Setting input type to $INPUT"
-                shift
+            -i|--input)
+                if [[ "$2" == "pod5" || "$2" == "file" ]]; then
+		    INPUT="$2"
+                    log "INFO" "Setting input type to $INPUT"
+                    shift 2
+                else
+                    echo "Error: Invalid input type specified. Please use 'pod5' or 'file'."
+                    display_help
+                    exit 1
+                fi
                 ;;
             -t|--threads)
                 t="$2"
