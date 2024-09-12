@@ -1,0 +1,56 @@
+#!/bin/bash
+# ============================================================================
+# Mount remote server U with your user credentials
+# ============================================================================
+#
+# Usage:
+#   mountU
+#
+# Note:
+#	- Credentials are not stored when running this script
+#
+# Author: Cristina S. Mesquita
+# Date: May 2024
+# Version: 1.0
+#
+# ============================================================================
+
+# Function to create credentials file
+create_credentials_file() {
+	current_user=$(whoami)
+    local cred_file="/home/$current_user/Documents/.smbcredentials"
+    read -p "i3S username: " user
+    read -s -p "password: " pass
+    echo
+
+    echo "user=$user" > "$cred_file"
+    echo "password=$pass" >> "$cred_file"
+    echo "domain=I3S" >> "$cred_file"
+    chmod 600 "$cred_file"
+}
+
+# Function to mount the share
+mount_share() {
+    local mount_point="/media/U"
+    local share="//john.i3s.up.pt/i3sDiagnostics$"
+    local cred_file="/home/i3sdiag/Documents/.smbcredentials"
+
+    if ! mountpoint -q "$mount_point"; then
+        cat /home/$current_user/Documents/.sudo | sudo -S mount.cifs "$share" "$mount_point" -o credentials="$cred_file",uid=$(id -u),gid=$(id -g),dir_mode=0777,file_mode=0666,nodev,nosuid,rw,user,iocharset=utf8,mfsymlinks
+        if [ $? -eq 0 ]; then
+            echo "Mount successful"
+        else
+            echo "Mount failed"
+            return 1
+        fi
+    else
+        echo "Already mounted"
+    fi
+}
+
+# Main execution
+create_credentials_file
+mount_share
+
+# Clean up credentials file
+rm -f /home/$current_user/Documents/.smbcredentials
